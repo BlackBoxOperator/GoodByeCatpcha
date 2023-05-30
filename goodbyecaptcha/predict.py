@@ -1,5 +1,6 @@
 from io import BytesIO
 
+import os
 import cv2
 import numpy as np
 from PIL import Image
@@ -10,7 +11,9 @@ __all__ = [
     'is_marked',
     "get_output_layers",
     "draw_prediction",
-    "predict"
+    "predict",
+    "ultralytics_yolo",
+    "darknet_yolo",
 ]
 
 
@@ -37,20 +40,62 @@ def draw_prediction(img, x, y, x_plus_w, y_plus_h):
     color = 256  # Blue
     cv2.rectangle(img, (x, y), (x_plus_w, y_plus_h), color, cv2.FILLED)
 
+"""
+reference: https://alimustoofaa.medium.com/how-to-load-model-yolov8-onnx-cv2-dnn-3e176cde16e6
+"""
 
-async def predict(file, obj=None):
-    """Predict Object on image"""
-    weight_file = f"{package_dir}/models/yolov3.weights"
-    file_names = f"{package_dir}/models/yolov3.txt"
-    file_cfg = f"{package_dir}/models/yolov3.cfg"
+def check_model_exist(model_pairs):
+    for m, c in model_pairs:
+        if os.path.isfile(m) and os.path.isfile(c):
+            return m, c
+    return None
 
-    image = cv2.imread(file)
-    width = image.shape[1]
-    height = image.shape[0]
-    scale = 0.00392
+# yolo5l
+def ultralytics_yolo(model_name = "yolov8l-cls.pt"):
+    filename = os.path.splitext(model_name)[0]
+    onnx_file = f"{filename}.onnx"
+    class_file = f"{filename}.txt"
 
-    with open(file_names, 'r') as f:
+    base_model = os.path.basename(model_name)
+    base_onnx = os.path.basename(onnx_file)
+    base_class = os.path.basename(class_file)
+
+    pair = check_model_exist( \
+        [(onnx_file, class_file),
+         (f"{package_dir}/models/{base_onnx}",
+          f"{package_dir}/models/{base_class}")])
+
+    if pair:
+        weight_file, class_file = pair
+    else:
+        class_file = base_class
+        from ultralytics.yolo.engine.model import YOLO
+        model = YOLO(base_model)
+        results = model.predict(source="https://ultralytics.com/images/bus.jpg")[0]
+        model.export(format="onnx",opset=12)  # export the model to ONNX format
+        weight_file = f"{package_dir}/models/{base_onnx}"
+        # print(f"rename {base_onnx} to {weight_file}")
+        os.rename(base_onnx, weight_file)
+        os.remove(base_model)
+        os.remove("bus.jpg")
+        class_file = f"{package_dir}/models/{base_class}"
+        classes = model.names
+        with open(class_file, 'w') as f:
+            print('\n'.join([classes[k] for k in classes]), file = f)
+
+    # Load Model
+    net = cv2.dnn.readNet(weight_file)
+    # Load Class
+    with open(class_file, 'r') as f:
         classes = [line.strip() for line in f.readlines()]
+
+    return net, classes
+
+
+async def darknet_yolo(model_name = "yolov3"):
+    weight_file = f"{package_dir}/models/yolov3.weights"
+    class_file = f"{package_dir}/models/yolov3.txt"
+    file_cfg = f"{package_dir}/models/yolov3.cfg"
 
     # Import YoloV3
     try:
@@ -82,7 +127,24 @@ async def predict(file, obj=None):
         # Save weights matrix
         with open(weight_file, 'wb') as f:
             f.write(_data.getvalue())
-        return await predict(file, obj)  # Reload method
+        return await darknet_yolo(model_name)  # Reload method
+
+    with open(class_file, 'r') as f:
+        classes = [line.strip() for line in f.readlines()]
+        return net, classes
+
+
+async def predict(file, obj=None):
+    """Predict Object on image"""
+    image = cv2.imread(file)
+    width = image.shape[1]
+    height = image.shape[0]
+    scale = 0.00392
+
+    if '.' in file:
+        net, classes = ultralytics_yolo(file)
+    else:
+        net, classes = darknet_yolo(file)
 
     if obj is None:
         blob = cv2.dnn.blobFromImage(image, scale, (416, 416), (0, 0, 0), True, crop=False)
